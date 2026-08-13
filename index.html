@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Photo AR Viewer</title>
+
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.3.1/model-viewer.min.js"></script>
+
+<style>
+  :root {
+    --bg: #101215;
+    --panel: #181b20;
+    --line: #2a2f36;
+    --text: #e8eaed;
+    --muted: #949aa3;
+    --accent: #4da3ff;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    gap: 14px;
+  }
+
+  header h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  .drop {
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    padding: 22px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #1c2027; }
+  .drop strong { display: block; font-size: 15px; margin-bottom: 4px; }
+  .drop span { color: var(--muted); font-size: 12.5px; }
+  input[type=file] { display: none; }
+
+  .stage {
+    flex: 1;
+    min-height: 320px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    display: none;
+  }
+  .stage.on { display: block; }
+
+  model-viewer {
+    width: 100%;
+    height: 100%;
+    background-color: var(--panel);
+    --poster-color: transparent;
+  }
+
+  .controls { display: none; flex-direction: column; gap: 10px; }
+  .controls.on { display: flex; }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .row > span.label { min-width: 62px; }
+
+  button.opt {
+    background: #22262c;
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 11px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  button.opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.opt[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+  .msg { font-size: 13px; color: var(--muted); }
+  .msg.err { color: #ff8b7d; }
+
+  footer { color: var(--muted); font-size: 12px; }
+  code { background: #22262c; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Photo AR Viewer</h1>
+  <p>Load a photo, pick the print size, then tap the AR button to hang it on a real wall.</p>
+</header>
+
+<label class="drop" id="drop">
+  <strong>Choose a photo</strong>
+  <span>.jpg &middot; .png &middot; .heic &middot; .webp &mdash; or drag one here</span>
+  <input type="file" id="file" accept="image/*">
+</label>
+
+<div class="msg" id="msg"></div>
+
+<div class="controls" id="controls">
+  <div class="row" id="sizes">
+    <span class="label">Print size</span>
+    <button class="opt" data-in="7">5 &times; 7</button>
+    <button class="opt" data-in="10" aria-pressed="true">8 &times; 10</button>
+    <button class="opt" data-in="14">11 &times; 14</button>
+    <button class="opt" data-in="20">16 &times; 20</button>
+    <button class="opt" data-in="36">24 &times; 36</button>
+  </div>
+  <div class="row">
+    <span class="label">Hang on</span>
+    <button class="opt" id="wall" aria-pressed="true">Wall</button>
+    <button class="opt" id="floor" aria-pressed="false">Floor</button>
+    <button class="opt" id="frame" aria-pressed="false">Add frame</button>
+    <span id="info"></span>
+  </div>
+</div>
+
+<div class="stage" id="stage">
+  <model-viewer id="mv"
+    alt="Your photo, shown at print size"
+    ar
+    ar-modes="webxr scene-viewer quick-look"
+    ar-scale="fixed"
+    ar-placement="wall"
+    shadow-intensity="1"
+    exposure="1.1"
+    camera-controls
+    touch-action="pan-y">
+  </model-viewer>
+</div>
+
+<footer>
+  AR needs the page served over <code>https://</code> (or opened from a phone-accessible host) &mdash;
+  a file opened straight from local storage won't get camera access.
+</footer>
+
+<script>
+const fileInput = document.getElementById('file');
+const drop     = document.getElementById('drop');
+const stage    = document.getElementById('stage');
+const controls = document.getElementById('controls');
+const mv       = document.getElementById('mv');
+const msg      = document.getElementById('msg');
+const info     = document.getElementById('info');
+const sizes    = document.getElementById('sizes');
+const floorBtn = document.getElementById('floor');
+const wallBtn  = document.getElementById('wall');
+const frameBtn = document.getElementById('frame');
+
+let sourceFile = null;   // the photo the user picked
+let currentURL = null;   // blob URL currently in the viewer
+let longestIn  = 10;     // longest finished edge, in inches
+let framed     = false;
+
+function say(text, isError) {
+  msg.textContent = text || '';
+  msg.className = 'msg' + (isError ? ' err' : '');
+}
+
+function show(src, label) {
+  if (currentURL) URL.revokeObjectURL(currentURL);
+  currentURL = src;
+  mv.src = src;
+  stage.classList.add('on');
+  controls.classList.add('on');
+  info.textContent = label ? '\u00b7 ' + label : '';
+  say('');
+}
+
+/* ---------- controls ---------- */
+function setPlacement(mode) {
+  mv.setAttribute('ar-placement', mode);
+  wallBtn.setAttribute('aria-pressed', mode === 'wall');
+  floorBtn.setAttribute('aria-pressed', mode === 'floor');
+}
+wallBtn.onclick  = () => setPlacement('wall');
+floorBtn.onclick = () => setPlacement('floor');
+
+sizes.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-in]');
+  if (!btn) return;
+  longestIn = parseFloat(btn.dataset.in);
+  [...sizes.querySelectorAll('button')].forEach(b =>
+    b.setAttribute('aria-pressed', b === btn));
+  rebuild();
+});
+
+frameBtn.onclick = () => {
+  framed = !framed;
+  frameBtn.setAttribute('aria-pressed', framed);
+  rebuild();
+};
+
+/* ---------- input handling ---------- */
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+function handleFile(file) {
+  if (!file.type.startsWith('image/')) {
+    say('That file is not a photo. Choose a .jpg, .png, .heic, or .webp image.', true);
+    return;
+  }
+  sourceFile = file;
+  rebuild();
+}
+
+async function rebuild() {
+  if (!sourceFile) return;
+  say('Preparing ' + sourceFile.name + '\u2026');
+  try {
+    const texture = await makeTexture(sourceFile, framed);
+    const bytes   = new Uint8Array(await texture.blob.arrayBuffer());
+    const glb     = buildPanelGlb(bytes, 'image/jpeg', texture.w, texture.h, longestIn * 0.0254);
+    const label   = sizes.querySelector('[aria-pressed="true"]').textContent.trim() + '\u2033';
+    show(URL.createObjectURL(glb), label);
+  } catch (err) {
+    console.error(err);
+    say('That photo could not be read: ' + err.message, true);
+  }
+}
+
+/* ---------- draw the photo (and optional frame) to a canvas ---------- */
+async function makeTexture(file, withFrame) {
+  const img = await loadImage(file);
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const long = Math.max(iw, ih);
+
+  const mat   = withFrame ? Math.round(long * 0.06)  : 0;  // white mat board
+  const rail  = withFrame ? Math.round(long * 0.028) : 0;  // outer frame rail
+  const pad   = mat + rail;
+
+  const c = document.createElement('canvas');
+  c.width  = iw + pad * 2;
+  c.height = ih + pad * 2;
+  const ctx = c.getContext('2d');
+
+  if (withFrame) {
+    ctx.fillStyle = '#2b2622';                     // frame rail
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#f6f3ec';                     // mat
+    ctx.fillRect(rail, rail, c.width - rail * 2, c.height - rail * 2);
+  }
+  ctx.drawImage(img, pad, pad, iw, ih);
+
+  const blob = await new Promise((resolve, reject) =>
+    c.toBlob(b => b ? resolve(b) : reject(new Error('the image could not be converted')),
+             'image/jpeg', 0.92));
+
+  return { blob, w: c.width, h: c.height };
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload  = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('this format is not supported by the browser')); };
+    img.src = url;
+  });
+}
+
+/* ---------- wrap the photo in a minimal GLB so it can be placed in AR ---------- */
+function buildPanelGlb(bytes, mimeType, pxW, pxH, longestMetres) {
+  const scale = longestMetres / Math.max(pxW, pxH);
+  const hw = pxW * scale / 2;
+  const hh = pxH * scale / 2;
+
+  const positions = new Float32Array([-hw,-hh,0,  hw,-hh,0,  hw,hh,0,  -hw,hh,0]);
+  const uvs       = new Float32Array([0,1, 1,1, 1,0, 0,0]);
+  const indices   = new Uint16Array([0,1,2, 0,2,3]);
+
+  const parts = [];
+  const views = [];
+  let offset = 0;
+  const push = (buf) => {
+    const u8 = new Uint8Array(buf.buffer || buf);
+    views.push({ buffer: 0, byteOffset: offset, byteLength: u8.byteLength });
+    parts.push(u8);
+    offset += u8.byteLength;
+    const pad = (4 - (offset % 4)) % 4;
+    if (pad) { parts.push(new Uint8Array(pad)); offset += pad; }
+  };
+  push(positions);   // view 0
+  push(uvs);         // view 1
+  push(indices);     // view 2
+  push(bytes);       // view 3
+
+  const json = {
+    asset: { version: '2.0', generator: 'Photo AR Viewer' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0, name: 'photo_panel' }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, indices: 2, material: 0 }] }],
+    materials: [{
+      pbrMetallicRoughness: { baseColorTexture: { index: 0 }, metallicFactor: 0, roughnessFactor: 1 },
+      doubleSided: true
+    }],
+    textures: [{ sampler: 0, source: 0 }],
+    samplers: [{ magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33071 }],
+    images: [{ bufferView: 3, mimeType }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [-hw,-hh,0], max: [hw,hh,0] },
+      { bufferView: 1, componentType: 5126, count: 4, type: 'VEC2' },
+      { bufferView: 2, componentType: 5123, count: 6, type: 'SCALAR' }
+    ],
+    bufferViews: views,
+    buffers: [{ byteLength: offset }]
+  };
+
+  // binary chunk
+  const bin = new Uint8Array(offset);
+  let p = 0;
+  for (const part of parts) { bin.set(part, p); p += part.byteLength; }
+
+  // json chunk, space-padded to 4 bytes
+  let jsonBytes = new TextEncoder().encode(JSON.stringify(json));
+  const jsonPad = (4 - (jsonBytes.byteLength % 4)) % 4;
+  if (jsonPad) {
+    const padded = new Uint8Array(jsonBytes.byteLength + jsonPad);
+    padded.set(jsonBytes);
+    padded.fill(0x20, jsonBytes.byteLength);
+    jsonBytes = padded;
+  }
+
+  const total = 12 + 8 + jsonBytes.byteLength + 8 + bin.byteLength;
+  const out = new ArrayBuffer(total);
+  const dv = new DataView(out);
+  const u8 = new Uint8Array(out);
+  dv.setUint32(0, 0x46546C67, true);  // "glTF"
+  dv.setUint32(4, 2, true);
+  dv.setUint32(8, total, true);
+  dv.setUint32(12, jsonBytes.byteLength, true);
+  dv.setUint32(16, 0x4E4F534A, true); // "JSON"
+  u8.set(jsonBytes, 20);
+  const binStart = 20 + jsonBytes.byteLength;
+  dv.setUint32(binStart, bin.byteLength, true);
+  dv.setUint32(binStart + 4, 0x004E4942, true); // "BIN"
+  u8.set(bin, binStart + 8);
+
+  return new Blob([out], { type: 'model/gltf-binary' });
+}
+
+mv.addEventListener('error', () => say('The preview failed to build. Try a different photo.', true));
+</script>
+
+</body>
+</html>
