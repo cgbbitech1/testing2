@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Photo AR Viewer</title>
+
+<style>
+  :root {
+    --bg: #101215;
+    --panel: #181b20;
+    --line: #2a2f36;
+    --text: #e8eaed;
+    --muted: #949aa3;
+    --accent: #4da3ff;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    gap: 14px;
+  }
+
+  header h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  .drop {
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    padding: 22px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #1c2027; }
+  .drop strong { display: block; font-size: 15px; margin-bottom: 4px; }
+  .drop span { color: var(--muted); font-size: 12.5px; }
+  input[type=file] { display: none; }
+
+  .stage {
+    flex: 1;
+    min-height: 200px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+    overflow: hidden;
+  }
+  .stage.on { display: flex; }
+  .stage img { max-width: 100%; max-height: 100%; display: block; }
+
+  .controls { display: none; flex-direction: column; gap: 10px; }
+  .controls.on { display: flex; }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .row > span.label { min-width: 62px; }
+
+  button.opt {
+    background: #22262c;
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 11px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  button.opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.opt[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+  button.go {
+    background: var(--accent);
+    border: none;
+    color: #06121f;
+    font-weight: 600;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    width: 100%;
+  }
+  button.go:disabled { background: #2a2f36; color: var(--muted); cursor: default; }
+
+  button.link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 12.5px;
+    padding: 2px 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  button.link[hidden] { display: none; }
+
+  .note { font-size: 12px; color: var(--muted); }
+  .msg { font-size: 13px; color: var(--muted); }
+  .msg.err { color: #ff8b7d; }
+
+  footer { color: var(--muted); font-size: 12px; }
+  code { background: #22262c; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+
+  #arlink { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+
+  /* ---------- AR layers ---------- */
+  #feed, #glcanvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: none;
+    z-index: 20;
+  }
+  #feed { object-fit: cover; background: #000; }
+  #glcanvas { z-index: 21; }
+  #feed.on, #glcanvas.on { display: block; }
+
+  #overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 22;
+    display: none;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 0 16px calc(28px + env(safe-area-inset-bottom));
+    gap: 12px;
+    pointer-events: none;
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #overlay.on { display: flex; }
+  #hint {
+    background: rgba(10,12,15,.72);
+    color: #fff;
+    border-radius: 999px;
+    padding: 9px 16px;
+    font-size: 13.5px;
+    backdrop-filter: blur(6px);
+  }
+  #arbar { display: flex; gap: 10px; pointer-events: auto; }
+  #arbar button {
+    background: rgba(10,12,15,.72);
+    border: 1px solid rgba(255,255,255,.22);
+    color: #fff;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13.5px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header>
+  <h1>Photo AR Viewer</h1>
+  <p>Load a photo, pick the print size, then tap the screen to hang it. No scanning, no dragging.</p>
+</header>
+
+<label class="drop" id="drop">
+  <strong>Choose a photo</strong>
+  <span>.jpg &middot; .png &middot; .heic &middot; .webp &mdash; or drag one here</span>
+  <input type="file" id="file" accept="image/*">
+</label>
+
+<div class="msg" id="msg"></div>
+
+<div class="stage" id="stage"><img id="preview" alt="Preview of the photo at the chosen print size"></div>
+
+<div class="controls" id="controls">
+  <div class="row" id="sizes">
+    <span class="label">Print size</span>
+    <button class="opt" data-in="7">5 &times; 7</button>
+    <button class="opt" data-in="10" aria-pressed="true">8 &times; 10</button>
+    <button class="opt" data-in="14">11 &times; 14</button>
+    <button class="opt" data-in="20">16 &times; 20</button>
+    <button class="opt" data-in="36">24 &times; 36</button>
+  </div>
+  <div class="row" id="dists">
+    <span class="label">Wall is</span>
+    <button class="opt" data-ft="3">3 ft away</button>
+    <button class="opt" data-ft="6" aria-pressed="true">6 ft</button>
+    <button class="opt" data-ft="10">10 ft</button>
+    <button class="opt" data-ft="15">15 ft</button>
+  </div>
+  <div class="row">
+    <span class="label">Hangs at</span>
+    <button class="opt" id="eye" aria-pressed="true">Eye level</button>
+    <button class="opt" id="floor" aria-pressed="false">On the floor</button>
+    <button class="opt" id="frame" aria-pressed="false">Add frame</button>
+  </div>
+  <button class="go" id="start">Start AR</button>
+  <button class="link" id="quicklook" hidden>Or open in Apple AR Quick Look</button>
+  <div class="note" id="modeNote"></div>
+</div>
+
+<footer>
+  The camera needs the page served over <code>https://</code>. A file opened straight from local
+  storage won't get camera access.
+</footer>
+
+<a id="arlink" rel="ar" href=""><img id="arthumb" alt=""></a>
+
+<video id="feed" playsinline muted autoplay></video>
+<canvas id="glcanvas"></canvas>
+
+<div id="overlay">
+  <div id="hint">Tap to place</div>
+  <div id="arbar">
+    <button id="again" hidden>Place again</button>
+    <button id="exit">Done</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { USDZExporter } from 'three/addons/exporters/USDZExporter.js';
+
+const fileInput = document.getElementById('file');
+const drop      = document.getElementById('drop');
+const stage     = document.getElementById('stage');
+const preview   = document.getElementById('preview');
+const controls  = document.getElementById('controls');
+const msg       = document.getElementById('msg');
+const modeNote  = document.getElementById('modeNote');
+const sizes     = document.getElementById('sizes');
+const dists     = document.getElementById('dists');
+const eyeBtn    = document.getElementById('eye');
+const floorBtn  = document.getElementById('floor');
+const frameBtn  = document.getElementById('frame');
+const startBtn  = document.getElementById('start');
+const qlBtn     = document.getElementById('quicklook');
+const arLink    = document.getElementById('arlink');
+const arThumb   = document.getElementById('arthumb');
+const feed      = document.getElementById('feed');
+const glcanvas  = document.getElementById('glcanvas');
+const overlay   = document.getElementById('overlay');
+const hint      = document.getElementById('hint');
+const againBtn  = document.getElementById('again');
+const exitBtn   = document.getElementById('exit');
+
+let sourceFile = null;
+let texCanvas  = null;    // composited photo (+ optional frame)
+let longestIn  = 10;      // longest finished edge, inches
+let distFt     = 6;       // how far away the wall is
+let height     = 'eye';   // 'eye' | 'floor'
+let framed     = false;
+let usdzURL    = null;
+let hasXR      = false;
+const EYE_M    = 1.55;    // assumed eye height when standing
+
+function say(text, isError) {
+  msg.textContent = text || '';
+  msg.className = 'msg' + (isError ? ' err' : '');
+}
+
+function panelSize() {
+  const metres = longestIn * 0.0254;
+  const scale  = metres / Math.max(texCanvas.width, texCanvas.height);
+  return { w: texCanvas.width * scale, h: texCanvas.height * scale };
+}
+
+/* ---------- capability check ---------- */
+(async function detect() {
+  hasXR = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-ar').catch(() => false));
+  qlBtn.hidden = !document.createElement('a').relList.supports('ar');
+  modeNote.textContent = hasXR
+    ? 'The photo appears straight ahead. Tap anywhere to lock it in place.'
+    : 'The photo appears straight ahead. Tap anywhere to lock it, then turn to look around. Walking won\u2019t shift it, so stand roughly still.';
+})();
+
+/* ---------- controls ---------- */
+function pick(group, attr, apply) {
+  group.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-' + attr + ']');
+    if (!btn) return;
+    apply(parseFloat(btn.dataset[attr]));
+    [...group.querySelectorAll('button[data-' + attr + ']')]
+      .forEach(b => b.setAttribute('aria-pressed', b === btn));
+    invalidateUsdz();
+  });
+}
+pick(sizes, 'in', v => longestIn = v);
+pick(dists, 'ft', v => distFt = v);
+
+function setHeight(next) {
+  height = next;
+  eyeBtn.setAttribute('aria-pressed', next === 'eye');
+  floorBtn.setAttribute('aria-pressed', next === 'floor');
+  invalidateUsdz();
+}
+eyeBtn.onclick   = () => setHeight('eye');
+floorBtn.onclick = () => setHeight('floor');
+
+frameBtn.onclick = () => {
+  framed = !framed;
+  frameBtn.setAttribute('aria-pressed', framed);
+  rebuild();
+};
+
+function invalidateUsdz() {
+  if (usdzURL) { URL.revokeObjectURL(usdzURL); usdzURL = null; }
+}
+
+/* ---------- input ---------- */
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+function handleFile(file) {
+  if (!file.type.startsWith('image/')) {
+    say('That file is not a photo. Choose a .jpg, .png, .heic, or .webp image.', true);
+    return;
+  }
+  sourceFile = file;
+  rebuild();
+}
+
+async function rebuild() {
+  if (!sourceFile) return;
+  say('Preparing ' + sourceFile.name + '\u2026');
+  invalidateUsdz();
+  try {
+    texCanvas = await composite(sourceFile, framed);
+    const dataURL = texCanvas.toDataURL('image/jpeg', 0.9);
+    preview.src = dataURL;
+    arThumb.src = dataURL;      // Quick Look needs an image inside the AR link
+    stage.classList.add('on');
+    controls.classList.add('on');
+    say('');
+  } catch (err) {
+    console.error(err);
+    say('That photo could not be read: ' + err.message, true);
+  }
+}
+
+/* ---------- draw the photo (and optional frame) to a canvas ---------- */
+async function composite(file, withFrame) {
+  const img = await loadImage(file);
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const long = Math.max(iw, ih);
+
+  const mat  = withFrame ? Math.round(long * 0.06)  : 0;
+  const rail = withFrame ? Math.round(long * 0.028) : 0;
+  const pad  = mat + rail;
+
+  const c = document.createElement('canvas');
+  c.width  = iw + pad * 2;
+  c.height = ih + pad * 2;
+  const ctx = c.getContext('2d');
+
+  if (withFrame) {
+    ctx.fillStyle = '#2b2622';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#f6f3ec';
+    ctx.fillRect(rail, rail, c.width - rail * 2, c.height - rail * 2);
+  }
+  ctx.drawImage(img, pad, pad, iw, ih);
+  return c;
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload  = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('this format is not supported by the browser')); };
+    img.src = url;
+  });
+}
+
+/* ---------- shared three.js pieces ---------- */
+let renderer, scene, camera, photo;
+
+function makePhoto(basicOpacity) {
+  const { w, h } = panelSize();
+  const tex = new THREE.CanvasTexture(texCanvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, opacity: basicOpacity })
+  );
+  mesh.userData.halfHeight = h / 2;
+  return mesh;
+}
+
+function disposePhoto() {
+  if (!photo) return;
+  scene.remove(photo);
+  photo.geometry.dispose();
+  photo.material.map.dispose();
+  photo.material.dispose();
+  photo = null;
+}
+
+/* position the panel straight ahead of the camera, upright and level */
+const fwd = new THREE.Vector3();
+function aimAhead(mesh, camObj) {
+  camObj.getWorldDirection(fwd);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+
+  const eye = new THREE.Vector3();
+  camObj.getWorldPosition(eye);
+
+  const d = distFt * 0.3048;
+  mesh.position.copy(eye).addScaledVector(fwd, d);
+  mesh.position.y = (height === 'floor')
+    ? floorY(eye) + mesh.userData.halfHeight
+    : eye.y;
+
+  mesh.quaternion.setFromRotationMatrix(
+    new THREE.Matrix4().lookAt(mesh.position, eye, new THREE.Vector3(0, 1, 0))
+  );
+}
+let floorLevel = null;                      // set by WebXR local-floor when available
+function floorY(eye) { return floorLevel !== null ? floorLevel : eye.y - EYE_M; }
+
+/* ---------- route A: WebXR (6-DOF), tap to place, no hit-test ---------- */
+let session = null, refSpace = null, placed = false;
+
+async function startWebXR() {
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({ canvas: glcanvas, alpha: true, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+  }
+  renderer.xr.enabled = true;
+  scene  = scene || new THREE.Scene();
+  camera = camera || new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 60);
+
+  disposePhoto();
+  photo = makePhoto(0.6);
+  scene.add(photo);
+  placed = false;
+  againBtn.hidden = true;
+
+  try {
+    session = await navigator.xr.requestSession('immersive-ar', {
+      optionalFeatures: ['dom-overlay', 'local-floor'],
+      domOverlay: { root: overlay }
+    });
+  } catch (err) {
+    say('AR could not start: ' + err.message, true);
+    return;
+  }
+
+  glcanvas.classList.add('on');
+  overlay.classList.add('on');
+  hint.textContent = 'Tap to place';
+
+  try { renderer.xr.setReferenceSpaceType('local-floor'); floorLevel = 0; }
+  catch { renderer.xr.setReferenceSpaceType('local'); floorLevel = null; }
+
+  await renderer.xr.setSession(session);
+  refSpace = renderer.xr.getReferenceSpace();
+
+  session.addEventListener('select', lockIt);
+  session.addEventListener('end', endWebXR);
+
+  renderer.setAnimationLoop(() => {
+    if (!placed) aimAhead(photo, renderer.xr.getCamera());
+    renderer.render(scene, camera);
+  });
+}
+
+function endWebXR() {
+  renderer.setAnimationLoop(null);
+  renderer.xr.enabled = false;
+  glcanvas.classList.remove('on');
+  overlay.classList.remove('on');
+  session = null;
+  placed = false;
+}
+
+/* ---------- route B: camera feed + device orientation (3-DOF) ---------- */
+let stream = null, rafID = 0, orienting = false;
+const devQuat = new THREE.Quaternion();
+let devEuler = { alpha: 0, beta: 0, gamma: 0 };
+
+function onOrientation(e) {
+  if (e.alpha === null) return;
+  devEuler = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+}
+
+const zee = new THREE.Vector3(0, 0, 1);
+const q1  = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const eul = new THREE.Euler();
+const q0  = new THREE.Quaternion();
+function updateDeviceQuat() {
+  const a = THREE.MathUtils.degToRad(devEuler.alpha);
+  const b = THREE.MathUtils.degToRad(devEuler.beta);
+  const g = THREE.MathUtils.degToRad(devEuler.gamma);
+  const o = THREE.MathUtils.degToRad(screen.orientation ? screen.orientation.angle : (window.orientation || 0));
+  eul.set(b, a, -g, 'YXZ');
+  devQuat.setFromEuler(eul);
+  devQuat.multiply(q1);
+  devQuat.multiply(q0.setFromAxisAngle(zee, -o));
+}
+
+async function startCameraMode() {
+  // gyro permission must be asked inside the tap that started AR
+  if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) {
+    try { orienting = (await DeviceOrientationEvent.requestPermission()) === 'granted'; }
+    catch { orienting = false; }
+  } else {
+    orienting = true;
+  }
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }, audio: false
+    });
+  } catch (err) {
+    say('The camera could not be opened: ' + err.message, true);
+    return;
+  }
+
+  feed.srcObject = stream;
+  await feed.play().catch(() => {});
+
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({ canvas: glcanvas, alpha: true, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+  }
+  renderer.xr.enabled = false;
+  renderer.setSize(innerWidth, innerHeight, false);
+  renderer.setClearAlpha(0);
+
+  scene  = scene || new THREE.Scene();
+  camera = camera || new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.01, 60);
+  camera.fov = 65;
+  camera.aspect = innerWidth / innerHeight;
+  camera.position.set(0, EYE_M, 0);
+  camera.updateProjectionMatrix();
+  floorLevel = 0;
+
+  disposePhoto();
+  photo = makePhoto(0.6);
+  scene.add(photo);
+  placed = false;
+  againBtn.hidden = true;
+
+  if (orienting) window.addEventListener('deviceorientation', onOrientation, true);
+
+  feed.classList.add('on');
+  glcanvas.classList.add('on');
+  overlay.classList.add('on');
+  hint.textContent = 'Tap to place';
+  glcanvas.addEventListener('pointerdown', lockIt);
+
+  const loop = () => {
+    rafID = requestAnimationFrame(loop);
+    if (orienting) { updateDeviceQuat(); camera.quaternion.copy(devQuat); }
+    camera.updateMatrixWorld(true);
+    if (!placed) aimAhead(photo, camera);
+    renderer.render(scene, camera);
+  };
+  loop();
+}
+
+function endCameraMode() {
+  cancelAnimationFrame(rafID);
+  glcanvas.removeEventListener('pointerdown', lockIt);
+  window.removeEventListener('deviceorientation', onOrientation, true);
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  feed.srcObject = null;
+  feed.classList.remove('on');
+  glcanvas.classList.remove('on');
+  overlay.classList.remove('on');
+  placed = false;
+}
+
+/* ---------- place / unplace ---------- */
+function lockIt() {
+  if (placed || !photo) return;
+  placed = true;                       // nothing moves it after this
+  photo.material.opacity = 1;
+  hint.textContent = 'Placed';
+  againBtn.hidden = false;
+}
+
+againBtn.onclick = () => {
+  placed = false;
+  if (photo) photo.material.opacity = 0.6;
+  againBtn.hidden = true;
+  hint.textContent = 'Tap to place';
+};
+
+exitBtn.onclick = () => {
+  if (session) session.end();
+  else endCameraMode();
+};
+
+overlay.addEventListener('beforexrselect', e => {
+  if (e.target.closest('button')) e.preventDefault();
+});
+overlay.addEventListener('pointerdown', e => {
+  if (e.target.closest('button')) e.stopPropagation();
+});
+
+/* ---------- optional: Apple AR Quick Look ---------- */
+qlBtn.onclick = async () => {
+  if (!texCanvas) return;
+  say('Building the AR file\u2026');
+  try {
+    if (!usdzURL) {
+      const { w, h } = panelSize();
+      const tex = new THREE.CanvasTexture(texCanvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, h),
+        new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0, side: THREE.DoubleSide })
+      );
+      if (height === 'floor') mesh.position.y = h / 2;
+      const s = new THREE.Scene();
+      s.add(mesh);
+      s.updateMatrixWorld(true);
+      const exporter = new USDZExporter();
+      const bytes = exporter.parseAsync ? await exporter.parseAsync(s) : await exporter.parse(s);
+      usdzURL = URL.createObjectURL(new Blob([bytes], { type: 'model/vnd.usdz+zip' }));
+    }
+    arLink.href = usdzURL + '#allowsContentScaling=0';
+    arLink.click();
+    say('');
+  } catch (err) {
+    console.error(err);
+    say('The AR file could not be built: ' + err.message, true);
+  }
+};
+
+/* ---------- go ---------- */
+startBtn.onclick = () => {
+  if (!texCanvas) return;
+  if (hasXR) startWebXR();
+  else startCameraMode();
+};
+
+window.addEventListener('resize', () => {
+  if (!renderer || !camera) return;
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  if (!session) renderer.setSize(innerWidth, innerHeight, false);
+});
+</script>
+
+</body>
+</html>
